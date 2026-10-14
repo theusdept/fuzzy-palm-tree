@@ -1,0 +1,188 @@
+import json
+import os
+import secrets
+import signal
+import sqlite3
+import threading
+import time
+import urllib.request
+import urllib.error
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+QUESTIONS = [
+ ('Which planet is known as the Red Planet?', ['Venus','Mars','Jupiter','Mercury'],1),
+ ('How many sides does a hexagon have?', ['5','6','7','8'],1),
+ ('What is the largest ocean?', ['Atlantic','Indian','Pacific','Arctic'],2),
+ ('Which element has the symbol Au?', ['Silver','Gold','Argon','Copper'],1),
+ ('What is 12 squared?', ['24','124','144','169'],2),
+ ('Who wrote Pride and Prejudice?', ['Jane Austen','Mary Shelley','Emily Brontë','Virginia Woolf'],0),
+ ('Which is a prime number?', ['21','27','29','33'],2),
+ ('What is the capital of Japan?', ['Kyoto','Seoul','Tokyo','Osaka'],2),
+ ('How many bones are in a typical adult human skeleton?', ['206','186','226','246'],0),
+ ('Which gas do plants absorb during photosynthesis?', ['Oxygen','Carbon dioxide','Helium','Hydrogen'],1),
+ ('What is the smallest prime number?', ['0','1','2','3'],2),
+ ('Which instrument measures atmospheric pressure?', ['Thermometer','Barometer','Hygrometer','Anemometer'],1),
+ ('Which continent contains the Sahara?', ['Asia','Africa','Europe','Australia'],1),
+ ('How many degrees are in a triangle?', ['90','180','270','360'],1),
+ ('Which animal is a mammal?', ['Shark','Dolphin','Trout','Octopus'],1),
+ ('What is the chemical formula for water?', ['CO2','H2O','O2','NaCl'],1),
+ ('Which language is primarily spoken in Brazil?', ['Spanish','Portuguese','French','Italian'],1),
+ ('Which planet is closest to the Sun?', ['Mercury','Venus','Earth','Mars'],0),
+ ('What is the square root of 81?', ['7','8','9','10'],2),
+ ('Which organ pumps blood?', ['Liver','Lung','Heart','Kidney'],2),
+ ('How many minutes are in three hours?', ['120','150','180','210'],2),
+ ('Which city is home to the Colosseum?', ['Athens','Rome','Paris','Madrid'],1),
+ ('Which is the largest planet in our solar system?', ['Saturn','Jupiter','Neptune','Earth'],1),
+ ('What is the freezing point of water at standard pressure in Celsius?', ['0','10','32','100'],0),
+ ('Which number is represented by the Roman numeral X?', ['5','10','50','100'],1),
+ ('Which country gifted the Statue of Liberty to the United States?', ['Italy','France','Spain','Germany'],1),
+ ('What is 15 percent of 200?', ['15','20','30','40'],2),
+ ('Which is the longest side of a right triangle?', ['Radius','Hypotenuse','Diameter','Median'],1),
+ ('Which ocean lies between Africa and Australia?', ['Pacific','Atlantic','Indian','Arctic'],2),
+ ('Which scientist is associated with the theory of general relativity?', ['Newton','Einstein','Darwin','Pasteur'],1),
+]
+COMMANDS = {'start':'Welcome and setup','newleague':'Create a group league (admin)', 'round':'Open a 60-second quiz (admin)', 'standings':'Weekly group leaderboard','help':'Commands and rules','privacy':'Data and privacy','mydata':'Export your stored player data','delete_me':'Delete your player data','closeleague':'Close league (admin)','plans':'Current access and plans'}
+HELP = 'LeagueHost 🏆\nTurn your group into a friendly weekly quiz league.\n\nAdd me to your group as an admin, then use /newleague. Group admins run /round; members tap one answer within 60 seconds. Correct answers earn 10 points. One answer per person. Scores reset on the weekly leaderboard each Monday (UTC).\n\n/standings — leaderboard\n/privacy — data information\n/mydata — export (private chat)\n/delete_me — delete (private chat)\n\nFree pilot: 30 questions. No purchases or cash prizes.'
+PRIVACY = 'LeagueHost stores Telegram user IDs, display names, group IDs, quiz answers, timestamps and scores to run leagues. It does not read unrelated chat history. Group standings show player names and scores. Player records older than 90 days are removed. /mydata exports your records in private chat. /delete_me requests confirmation to erase them. Deleting records removes your scores and can permit replay of an active question. Telegram retains messages under its own policy. Contact the group admin for league concerns.'
+
+class Store:
+ def __init__(self,path):
+  self.db=sqlite3.connect(path)
+  self.db.execute('PRAGMA journal_mode=WAL')
+  self.db.executescript('''CREATE TABLE IF NOT EXISTS leagues(chat INTEGER PRIMARY KEY, title TEXT, active INTEGER DEFAULT 1);
+CREATE TABLE IF NOT EXISTS rounds(id TEXT PRIMARY KEY, chat INTEGER, question INTEGER, expires INTEGER, week TEXT);
+CREATE TABLE IF NOT EXISTS answers(round TEXT, user INTEGER, name TEXT, choice INTEGER, points INTEGER, created INTEGER, PRIMARY KEY(round,user));
+CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS actions(update_id INTEGER PRIMARY KEY, result TEXT);''')
+ def week(self): return time.strftime('%G-W%V',time.gmtime())
+ def open_round(self,chat,update_id):
+  old=self.db.execute('SELECT result FROM actions WHERE update_id=?',(update_id,)).fetchone()
+  if old:return json.loads(old[0])
+  if not self.db.execute('SELECT 1 FROM leagues WHERE chat=? AND active=1',(chat,)).fetchone():return {'error':'An admin must create a league with /newleague first.'}
+  if self.db.execute('SELECT 1 FROM rounds WHERE chat=? AND expires>?',(chat,time.time())).fetchone():return {'error':'A round is already open. Wait 60 seconds.'}
+  used={r[0] for r in self.db.execute('SELECT question FROM rounds WHERE chat=? AND week=?',(chat,self.week()))}
+  options=[i for i in range(len(QUESTIONS)) if i not in used]
+  if not options:return {'error':'All 30 questions played this week. Your next league week starts Monday UTC.'}
+  result={'id':secrets.token_hex(8),'question':secrets.choice(options)}
+  with self.db:
+   self.db.execute('INSERT INTO rounds VALUES(?,?,?,?,?)',(result['id'],chat,result['question'],int(time.time())+60,self.week()))
+   self.db.execute('INSERT INTO actions VALUES(?,?)',(update_id,json.dumps(result)))
+  return result
+ def answer(self,rid,chat,user,name,choice):
+  row=self.db.execute('SELECT question,expires FROM rounds WHERE id=? AND chat=?',(rid,chat)).fetchone()
+  if not row or row[1]<time.time():return 'This round has ended.'
+  if not 0<=choice<4:return 'Invalid answer.'
+  points=10 if QUESTIONS[row[0]][2]==choice else 0
+  with self.db:
+   cur=self.db.execute('INSERT OR IGNORE INTO answers VALUES(?,?,?,?,?,?)',(rid,user,name[:64],choice,points,int(time.time())))
+  return 'Answer saved. Check /standings after the round.' if cur.rowcount else 'You already answered this round.'
+ def standings(self,chat):
+  rows=self.db.execute('SELECT a.user,MAX(a.name),SUM(a.points) FROM answers a JOIN rounds r ON r.id=a.round WHERE r.chat=? AND r.week=? AND r.expires<=? GROUP BY a.user ORDER BY SUM(a.points) DESC,a.user LIMIT 20',(chat,self.week(),time.time())).fetchall()
+  return '🏆 Weekly standings · '+self.week()+'\n\n'+ ('\n'.join(f'{i+1}. {r[1]} — {r[2]} pts' for i,r in enumerate(rows)) if rows else 'No finished rounds yet. Admins: /round')
+ def cleanup(self):
+  with self.db:
+   self.db.execute('DELETE FROM answers WHERE created<?',(time.time()-90*86400,))
+   self.db.execute('DELETE FROM rounds WHERE expires<?',(time.time()-90*86400,))
+   self.db.execute('DELETE FROM actions WHERE update_id < COALESCE((SELECT MAX(update_id)-10000 FROM actions),0)')
+
+class API:
+ def __init__(self,token):self.token=token
+ def call(self,method,**data):
+  req=urllib.request.Request('https://api.telegram.org/bot'+self.token+'/'+method,data=json.dumps(data).encode(),headers={'Content-Type':'application/json'})
+  try:
+   with urllib.request.urlopen(req,timeout=40) as response:result=json.load(response)
+  except urllib.error.HTTPError as error:
+   raise RuntimeError('Telegram HTTP '+str(error.code)) from None
+  if not result.get('ok'):raise RuntimeError('Telegram rejected '+method)
+  return result['result']
+
+class Bot:
+ def __init__(self,db,api,username):self.store=db;self.api=api;self.username=username
+ def send(self,chat,text,**kw):return self.api.call('sendMessage',chat_id=chat,text=text,**kw)
+ def handle(self,u):
+  cb=u.get('callback_query')
+  if cb:
+   m=cb.get('message',{});chat=m.get('chat',{}).get('id');uid=cb['from']['id'];data=cb.get('data','')
+   if data=='delete_confirm' and m.get('chat',{}).get('type')=='private' and chat==uid:
+    with self.store.db:self.store.db.execute('DELETE FROM answers WHERE user=?',(uid,))
+    result='Your stored player records have been deleted.'
+   else:
+    parts=data.split(':')
+    result=self.store.answer(parts[1],chat,uid,cb['from'].get('first_name','Player'),int(parts[2])) if len(parts)==3 and parts[0]=='a' and parts[2] in ['0','1','2','3'] else 'Invalid action.'
+   self.api.call('answerCallbackQuery',callback_query_id=cb['id'],text=result,show_alert=True);return
+  m=u.get('message',{});text=m.get('text','');sender=m.get('from',{})
+  if not text.startswith('/') or sender.get('is_bot') or m.get('sender_chat'):return
+  chat=m['chat']['id'];private=m['chat']['type']=='private';uid=sender['id'];first=text.split()[0];cmd=first.split('@')[0][1:]
+  if '@' in first and first.split('@')[1].lower()!=self.username.lower():return
+  if cmd in ('start','help'):self.send(chat,HELP);return
+  if cmd=='privacy':self.send(chat,PRIVACY);return
+  if cmd=='plans':self.send(chat,'Free pilot is active: group leagues, 30 quiz questions, and weekly standings. Paid host features are not available yet. No payment is required.');return
+  if cmd in ('mydata','delete_me'):
+   if not private:self.send(chat,'For your privacy, send /'+cmd+' in a private chat with me.');return
+   if cmd=='delete_me':self.send(chat,'Delete all your saved answers and scores? This cannot be undone.',reply_markup={'inline_keyboard':[[{'text':'Delete my player data','callback_data':'delete_confirm'}]]});return
+   rows=self.store.db.execute('SELECT round,name,choice,points,created FROM answers WHERE user=?',(uid,)).fetchall()
+   content=json.dumps({'user_id':uid,'answers':rows},ensure_ascii=False)
+   for offset in range(0,len(content),3500):self.send(chat,content[offset:offset+3500])
+   return
+  if cmd not in ('newleague','round','standings','closeleague'):self.send(chat,'Use /help to see the commands.');return
+  if private:self.send(chat,'Use this command in your Telegram group. Add me as a group admin first.');return
+  if cmd=='standings':self.send(chat,self.store.standings(chat));return
+  status=self.api.call('getChatMember',chat_id=chat,user_id=uid).get('status')
+  if status not in ('administrator','creator'):self.send(chat,'Only group admins can manage the league.');return
+  if cmd=='newleague':
+   with self.store.db:self.store.db.execute('INSERT INTO leagues VALUES(?,?,1) ON CONFLICT(chat) DO UPDATE SET active=1,title=excluded.title',(chat,m['chat'].get('title','League')))
+   self.send(chat,'🏆 League ready! An admin can use /round to open a question. Each round lasts 60 seconds. Correct answers earn 10 points.');return
+  if cmd=='closeleague':
+   with self.store.db:
+    self.store.db.execute('UPDATE leagues SET active=0 WHERE chat=?',(chat,))
+    self.store.db.execute('UPDATE rounds SET expires=MIN(expires,?) WHERE chat=?',(int(time.time())-1,chat))
+   self.send(chat,'League closed. Existing standings remain available. /newleague reopens it.');return
+  result=self.store.open_round(chat,u['update_id'])
+  if 'error' in result:self.send(chat,result['error']);return
+  q=QUESTIONS[result['question']]
+  self.send(chat,'⚡ 60-second round\n\n'+q[0]+'\n\nChoose once. 10 points for a correct answer.',reply_markup={'inline_keyboard':[[{'text':v,'callback_data':f"a:{result['id']}:{i}"}] for i,v in enumerate(q[1])]})
+
+STATUS={'configured':False,'connected':False,'last_poll':0}
+class Health(BaseHTTPRequestHandler):
+ def do_GET(self):
+  if self.path not in ('/','/health','/ready'):self.send_error(404);return
+  ready=STATUS['connected'] and time.time()-STATUS['last_poll']<90
+  self.send_response(200 if self.path!='/ready' or ready else 503);self.send_header('Content-Type','application/json');self.end_headers()
+  self.wfile.write(json.dumps({'service':'LeagueHost','configured':STATUS['configured'],'telegram_ready':ready}).encode())
+ def log_message(self,*args):pass
+
+def main():
+ threading.Thread(target=HTTPServer(('0.0.0.0',int(os.getenv('PORT','8080'))),Health).serve_forever,daemon=True).start()
+ stop=threading.Event()
+ for s in (signal.SIGTERM,signal.SIGINT):signal.signal(s,lambda *_:stop.set())
+ token=os.getenv('BOT_TOKEN','');STATUS['configured']=bool(token)
+ if not token:
+  print('Setup required: add BOT_TOKEN in Railway Variables.',flush=True)
+  stop.wait();return
+ path=os.getenv('DB_PATH','/data/leaguehost.db');os.makedirs(os.path.dirname(os.path.abspath(path)),exist_ok=True)
+ store=Store(path);api=API(token)
+ while not stop.is_set():
+  try:
+   me=api.call('getMe');wh=api.call('getWebhookInfo')
+   if wh.get('url'):raise RuntimeError('Existing webhook detected; remove it only after confirming this bot belongs to LeagueHost')
+   api.call('setMyCommands',commands=[{'command':k,'description':v} for k,v in COMMANDS.items()])
+   api.call('setMyDescription',description='Host friendly quiz leagues in your Telegram group. Play quick rounds, earn points, and climb the weekly leaderboard. Add LeagueHost to a group to start.')
+   api.call('setMyShortDescription',short_description='Your group. Your league. Quick quizzes and weekly bragging rights.')
+   bot=Bot(store,api,me['username']);STATUS['connected']=True;print('Telegram connected: @'+me['username'],flush=True);break
+  except Exception as e:print('Setup retry: '+type(e).__name__+': '+str(e),flush=True);stop.wait(15)
+ while not stop.is_set():
+  try:
+   row=store.db.execute("SELECT value FROM meta WHERE key='offset'").fetchone();offset=int(row[0]) if row else 0
+   updates=api.call('getUpdates',offset=offset,timeout=25,allowed_updates=['message','callback_query'])
+   STATUS['last_poll']=time.time();store.cleanup()
+   for u in updates:
+    if stop.is_set():break
+    try:bot.handle(u)
+    except RuntimeError as e:
+     # 400/403 are permanent delivery failures; transient errors retry without advancing.
+     if str(e) not in ('Telegram HTTP 400','Telegram HTTP 403'):raise
+     print('Skipped undeliverable update '+str(u['update_id']),flush=True)
+    with store.db:store.db.execute("INSERT OR REPLACE INTO meta VALUES('offset',?)",(str(u['update_id']+1),))
+  except Exception as e:print('Poll retry: '+type(e).__name__,flush=True);stop.wait(5)
+ store.db.close()
+if __name__=='__main__':main()
