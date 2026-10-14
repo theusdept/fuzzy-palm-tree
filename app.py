@@ -41,8 +41,8 @@ QUESTIONS = [
  ('Which ocean lies between Africa and Australia?', ['Pacific','Atlantic','Indian','Arctic'],2),
  ('Which scientist is associated with the theory of general relativity?', ['Newton','Einstein','Darwin','Pasteur'],1),
 ]
-COMMANDS = {'start':'Welcome and setup','newleague':'Create a group league (admin)', 'round':'Open a 60-second quiz (admin)', 'standings':'Weekly group leaderboard','help':'Commands and rules','privacy':'Data and privacy','mydata':'Export your stored player data','delete_me':'Delete your player data','closeleague':'Close league (admin)','plans':'Current access and plans'}
-HELP = 'LeagueHost 🏆\nTurn your group into a friendly weekly quiz league.\n\nAdd me to your group as an admin, then use /newleague. Group admins run /round; members tap one answer within 60 seconds. Correct answers earn 10 points. One answer per person. Scores reset on the weekly leaderboard each Monday (UTC).\n\n/standings — leaderboard\n/privacy — data information\n/mydata — export (private chat)\n/delete_me — delete (private chat)\n\nFree pilot: 30 questions. No purchases or cash prizes.'
+COMMANDS = {'start':'Welcome and setup','demo':'Try a private sample quiz','invite':'Add LeagueHost to your group','newleague':'Create a group league (admin)', 'round':'Open a 60-second quiz (admin)', 'standings':'Weekly group leaderboard','help':'Commands and rules','privacy':'Data and privacy','mydata':'Export your stored player data','delete_me':'Delete your player data','closeleague':'Close league (admin)','plans':'Current access and plans'}
+HELP = 'LeagueHost 🏆\nTurn your group into a friendly weekly quiz league.\n\nAdd me to your group as an admin, then use /newleague. Group admins run /round; members tap one answer within 60 seconds. Correct answers earn 10 points. One answer per person. Scores reset on the weekly leaderboard each Monday (UTC).\n\n/standings — leaderboard\n/privacy — data information\n/mydata — export (private chat)\n/delete_me — delete (private chat)\n\nTry /demo for a private sample question or /invite for a group invitation link.\n\nFree pilot: 30 questions. No purchases or cash prizes.'
 PRIVACY = 'LeagueHost stores Telegram user IDs, display names, group IDs, quiz answers, timestamps and scores to run leagues. It does not read unrelated chat history. Group standings show player names and scores. Player records older than 90 days are removed. /mydata exports your records in private chat. /delete_me requests confirmation to erase them. Deleting records removes your scores and can permit replay of an active question. Telegram retains messages under its own policy. Contact the group admin for league concerns.'
 
 class Store:
@@ -106,6 +106,12 @@ class Bot:
    if data=='delete_confirm' and m.get('chat',{}).get('type')=='private' and chat==uid:
     with self.store.db:self.store.db.execute('DELETE FROM answers WHERE user=?',(uid,))
     result='Your stored player records have been deleted.'
+   elif data.startswith('d:') and m.get('chat',{}).get('type')=='private' and chat==uid:
+    parts=data.split(':')
+    if len(parts)==3 and parts[1].isdigit() and parts[2] in ('0','1','2','3') and 0<=int(parts[1])<len(QUESTIONS):
+     question=QUESTIONS[int(parts[1])]
+     result='Correct! 🏆' if int(parts[2])==question[2] else 'Not quite. Correct answer: '+question[1][question[2]]
+    else:result='Invalid sample question.'
    else:
     parts=data.split(':')
     result=self.store.answer(parts[1],chat,uid,cb['from'].get('first_name','Player'),int(parts[2])) if len(parts)==3 and parts[0]=='a' and parts[2] in ['0','1','2','3'] else 'Invalid action.'
@@ -117,6 +123,12 @@ class Bot:
   if cmd in ('start','help'):self.send(chat,HELP);return
   if cmd=='privacy':self.send(chat,PRIVACY);return
   if cmd=='plans':self.send(chat,'Free pilot is active: group leagues, 30 quiz questions, and weekly standings. Paid host features are not available yet. No payment is required.');return
+  if cmd=='invite':
+   self.send(chat,'Add LeagueHost to your group:\nhttps://t.me/'+self.username+'?startgroup=league\n\nAfter adding me as an admin, use /newleague, then /round to play.');return
+  if cmd=='demo':
+   if not private:self.send(chat,'Open my private chat and send /demo to try a question.');return
+   idx=secrets.randbelow(len(QUESTIONS));q=QUESTIONS[idx]
+   self.send(chat,'🏆 Sample quiz — no account or payment required\n\n'+q[0]+'\n\nTry an answer below, then send /invite to start a group league.',reply_markup={'inline_keyboard':[[{'text':v,'callback_data':f'd:{idx}:{i}'}] for i,v in enumerate(q[1])]});return
   if cmd in ('mydata','delete_me'):
    if not private:self.send(chat,'For your privacy, send /'+cmd+' in a private chat with me.');return
    if cmd=='delete_me':self.send(chat,'Delete all your saved answers and scores? This cannot be undone.',reply_markup={'inline_keyboard':[[{'text':'Delete my player data','callback_data':'delete_confirm'}]]});return

@@ -28,6 +28,21 @@ class Tests(unittest.TestCase):
  def test_non_admin(self):
   api=API();Bot(self.s,api,'LeagueHostBot').handle({'update_id':2,'message':{'text':'/round','chat':{'id':-1,'type':'group'},'from':{'id':42}}})
   self.assertEqual(self.s.db.execute('SELECT COUNT(*) FROM rounds').fetchone()[0],0)
+ def test_private_demo(self):
+  api=API();Bot(self.s,api,'LeagueHostBot').handle({'update_id':10,'message':{'text':'/demo','chat':{'id':42,'type':'private'},'from':{'id':42}}})
+  self.assertEqual(api.calls[0][0],'sendMessage')
+  self.assertIn('Sample quiz',api.calls[0][1]['text'])
+  data=api.calls[0][1]['reply_markup']['inline_keyboard'][0][0]['callback_data']
+  self.assertTrue(data.startswith('d:'))
+  Bot(self.s,api,'LeagueHostBot').handle({'callback_query':{'id':'cb1','from':{'id':42},'message':{'chat':{'id':42,'type':'private'}},'data':data}})
+  self.assertEqual(api.calls[-1][0],'answerCallbackQuery')
+  self.assertEqual(self.s.db.execute('SELECT COUNT(*) FROM answers').fetchone()[0],0)
+ def test_demo_not_accepted_in_group(self):
+  api=API();Bot(self.s,api,'LeagueHostBot').handle({'callback_query':{'id':'cb2','from':{'id':42},'message':{'chat':{'id':-1,'type':'group'}},'data':'d:0:0'}})
+  self.assertEqual(api.calls[-1][1]['text'],'Invalid action.')
+ def test_invite_link(self):
+  api=API();Bot(self.s,api,'LeagueHostBot').handle({'update_id':11,'message':{'text':'/invite','chat':{'id':42,'type':'private'},'from':{'id':42}}})
+  self.assertIn('https://t.me/LeagueHostBot?startgroup=league',api.calls[-1][1]['text'])
  def test_other_bot(self):
   api=API();Bot(self.s,api,'LeagueHostBot').handle({'update_id':2,'message':{'text':'/round@OtherBot','chat':{'id':-1,'type':'group'},'from':{'id':42}}});self.assertEqual(api.calls,[])
  def test_closed_league(self):
