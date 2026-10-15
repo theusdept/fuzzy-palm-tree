@@ -1,4 +1,5 @@
 import json
+import billing
 import os
 import secrets
 import signal
@@ -41,7 +42,7 @@ QUESTIONS = [
  ('Which ocean lies between Africa and Australia?', ['Pacific','Atlantic','Indian','Arctic'],2),
  ('Which scientist is associated with the theory of general relativity?', ['Newton','Einstein','Darwin','Pasteur'],1),
 ]
-COMMANDS = {'start':'Welcome and setup','demo':'Try a private sample quiz','invite':'Add LeagueHost to your group','newleague':'Create a group league (admin)', 'round':'Open a 60-second quiz (admin)', 'standings':'Weekly group leaderboard','help':'Commands and rules','privacy':'Data and privacy','mydata':'Export your stored player data','delete_me':'Delete your player data','closeleague':'Close league (admin)','plans':'Current access and plans'}
+COMMANDS = {'start':'Welcome and setup','demo':'Try a private sample quiz','invite':'Add LeagueHost to your group','newleague':'Create a group league (admin)', 'round':'Open a 60-second quiz (admin)', 'standings':'Weekly group leaderboard','help':'Commands and rules','privacy':'Data and privacy','mydata':'Export your stored player data','delete_me':'Delete your player data','closeleague':'Close league (admin)','plans':'Current access and plans','upgrade':'Upgrade group league','paysupport':'Stars payment support','subscription':'Your Stars subscriptions'}
 HELP = 'LeagueHost 🏆\nTurn your group into a friendly weekly quiz league.\n\nAdd me to your group as an admin, then use /newleague. Group admins run /round; members tap one answer within 60 seconds. Correct answers earn 10 points. One answer per person. Scores reset on the weekly leaderboard each Monday (UTC).\n\n/standings — leaderboard\n/privacy — data information\n/mydata — export (private chat)\n/delete_me — delete (private chat)\n\nTry /demo for a private sample question or /invite for a group invitation link.\n\nFree pilot: 30 questions. No purchases or cash prizes.'
 PRIVACY = 'LeagueHost stores Telegram user IDs, display names, group IDs, quiz answers, timestamps and scores to run leagues. It does not read unrelated chat history. Group standings show player names and scores. Player records older than 90 days are removed. /mydata exports your records in private chat. /delete_me requests confirmation to erase them. Deleting records removes your scores and can permit replay of an active question. Telegram retains messages under its own policy. Contact the group admin for league concerns.'
 
@@ -54,15 +55,22 @@ CREATE TABLE IF NOT EXISTS rounds(id TEXT PRIMARY KEY, chat INTEGER, question IN
 CREATE TABLE IF NOT EXISTS answers(round TEXT, user INTEGER, name TEXT, choice INTEGER, points INTEGER, created INTEGER, PRIMARY KEY(round,user));
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS actions(update_id INTEGER PRIMARY KEY, result TEXT);''')
+  billing.create_tables(self.db)
  def week(self): return time.strftime('%G-W%V',time.gmtime())
  def open_round(self,chat,update_id):
   old=self.db.execute('SELECT result FROM actions WHERE update_id=?',(update_id,)).fetchone()
   if old:return json.loads(old[0])
   if not self.db.execute('SELECT 1 FROM leagues WHERE chat=? AND active=1',(chat,)).fetchone():return {'error':'An admin must create a league with /newleague first.'}
   if self.db.execute('SELECT 1 FROM rounds WHERE chat=? AND expires>?',(chat,time.time())).fetchone():return {'error':'A round is already open. Wait 60 seconds.'}
+  tier,_=billing.current_plan(self.db,chat)
+  cap={'free':5,'pro':20,'club':999999}[tier]
+  count=self.db.execute('SELECT COUNT(*) FROM rounds WHERE chat=? AND week=?',(chat,self.week())).fetchone()[0]
+  if count>=cap:return {'error':'Weekly round limit reached. Use /plans for upgrades.'}
   used={r[0] for r in self.db.execute('SELECT question FROM rounds WHERE chat=? AND week=?',(chat,self.week()))}
   options=[i for i in range(len(QUESTIONS)) if i not in used]
-  if not options:return {'error':'All 30 questions played this week. Your next league week starts Monday UTC.'}
+  if not options:
+   if tier!='club':return {'error':'Question pool exhausted. Try next week or use /plans.'}
+   options=list(range(len(QUESTIONS)))
   result={'id':secrets.token_hex(8),'question':secrets.choice(options)}
   with self.db:
    self.db.execute('INSERT INTO rounds VALUES(?,?,?,?,?)',(result['id'],chat,result['question'],int(time.time())+60,self.week()))
@@ -116,13 +124,45 @@ class Bot:
     parts=data.split(':')
     result=self.store.answer(parts[1],chat,uid,cb['from'].get('first_name','Player'),int(parts[2])) if len(parts)==3 and parts[0]=='a' and parts[2] in ['0','1','2','3'] else 'Invalid action.'
    self.api.call('answerCallbackQuery',callback_query_id=cb['id'],text=result,show_alert=True);return
+  pre=u.get('pre_checkout_query')
+  if pre:
+   ok=billing.is_precheckout_valid(self.store.db,pre,billing.checkout_enabled())
+   args={'pre_checkout_query_id':pre['id'],'ok':ok}
+   if not ok:args['error_message']='Checkout unavailable; request a fresh group upgrade link.'
+   self.api.call('answerPreCheckoutQuery',**args);return
   m=u.get('message',{});text=m.get('text','');sender=m.get('from',{})
+  if m.get('successful_payment'):
+   pay=m['successful_payment'];buyer=m.get('from',{}).get('id')
+   if buyer and billing.record_payment(self.store.db,pay,buyer):
+    self.send(m['chat']['id'],'Stars payment confirmed. Group plan activated. Use /subscription for details.')
+   return
   if not text.startswith('/') or sender.get('is_bot') or m.get('sender_chat'):return
   chat=m['chat']['id'];private=m['chat']['type']=='private';uid=sender['id'];first=text.split()[0];cmd=first.split('@')[0][1:]
   if '@' in first and first.split('@')[1].lower()!=self.username.lower():return
   if cmd in ('start','help'):self.send(chat,HELP);return
   if cmd=='privacy':self.send(chat,PRIVACY);return
-  if cmd=='plans':self.send(chat,'Free pilot is active: group leagues, 30 quiz questions, and weekly standings. Paid host features are not available yet. No payment is required.');return
+  if cmd=='plans':
+   tier,expiry=billing.current_plan(self.store.db,chat)
+   self.send(chat,'🏆 LeagueHost\nFree: 5 group rounds/week, 0 Stars\nPro: 20 group rounds/week, 100 Stars per 30 days\nClub: unlimited group rounds/week, 250 Stars per 30 days\n\nPaid plans renew automatically every 30 days. All tiers use the 30-question bank and weekly standings. Current tier: '+tier.title()+'\nGroup admins use /upgrade.')
+   return
+  if cmd=='paysupport':
+   self.send(chat,'Telegram Stars support: '+(os.getenv('PAYSUPPORT_CONTACT','Not configured') or 'Not configured')+'. To request cancellation or a refund, contact support with your group ID and payment date. Never send tokens.')
+   return
+  if cmd=='subscription':
+   if not private:self.send(chat,'Use /subscription in private chat.');return
+   entries=billing.subscription_for_buyer(self.store.db,uid)
+   self.send(chat,'Active purchases: '+('; '.join(str(r[0])+' '+r[1]+' ends '+time.strftime('%Y-%m-%d UTC',time.gmtime(r[2])) for r in entries) if entries else 'None')+'. For cancellation use /paysupport.')
+   return
+  if cmd=='upgrade':
+   if private:self.send(chat,'Send /upgrade in a group where you are an admin.');return
+   if self.api.call('getChatMember',chat_id=chat,user_id=uid).get('status') not in ('administrator','creator'):self.send(chat,'Only group admins can upgrade.');return
+   if not billing.checkout_enabled():self.send(chat,'Paid checkout is not active yet. Free play remains available.');return
+   links=[]
+   for name,plan in billing.PLANS.items():
+    payload=billing.create_order(self.store.db,chat,uid,name)
+    url=self.api.call('createInvoiceLink',title=plan['name'],description='Recurring 30-day group quiz subscription',payload=payload,provider_token='',currency='XTR',prices=[{'label':plan['name'],'amount':plan['stars']}],subscription_period=billing.PERIOD_SECONDS)
+    links.append([{'text':plan['name']+' · '+str(plan['stars'])+' Stars/30 days','url':url}])
+   self.send(chat,'Group '+str(chat)+' — choose your plan. These subscriptions renew every 30 days until canceled. Access starts after confirmed payment.',reply_markup={'inline_keyboard':links});return
   if cmd=='invite':
    self.send(chat,'Add LeagueHost to your group:\nhttps://t.me/'+self.username+'?startgroup=league\n\nAfter adding me as an admin, use /newleague, then /round to play.');return
   if cmd=='demo':
@@ -185,7 +225,7 @@ def main():
  while not stop.is_set():
   try:
    row=store.db.execute("SELECT value FROM meta WHERE key='offset'").fetchone();offset=int(row[0]) if row else 0
-   updates=api.call('getUpdates',offset=offset,timeout=25,allowed_updates=['message','callback_query'])
+   updates=api.call('getUpdates',offset=offset,timeout=25,allowed_updates=['message','callback_query','pre_checkout_query'])
    STATUS['last_poll']=time.time();store.cleanup()
    for u in updates:
     if stop.is_set():break
