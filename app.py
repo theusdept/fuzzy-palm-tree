@@ -42,7 +42,7 @@ QUESTIONS = [
  ('Which ocean lies between Africa and Australia?', ['Pacific','Atlantic','Indian','Arctic'],2),
  ('Which scientist is associated with the theory of general relativity?', ['Newton','Einstein','Darwin','Pasteur'],1),
 ]
-COMMANDS = {'start':'Welcome and setup','demo':'Try a private sample quiz','invite':'Add LeagueHost to your group','newleague':'Create a group league (admin)', 'round':'Open a 60-second quiz (admin)', 'standings':'Weekly group leaderboard','help':'Commands and rules','privacy':'Data and privacy','mydata':'Export your stored player data','delete_me':'Delete your player data','closeleague':'Close league (admin)','plans':'Current access and plans','upgrade':'Upgrade group league','paysupport':'Stars payment support','subscription':'Your Stars subscriptions','cancel':'Cancel renewal in private chat','terms':'Plan terms','support':'Contact support'}
+COMMANDS = {'start':'Welcome and setup','demo':'Try a private sample quiz','invite':'Add LeagueHost to your group','newleague':'Create a group league (admin)', 'round':'Open a 60-second quiz (admin)', 'standings':'Weekly group leaderboard','help':'Commands and rules','privacy':'Data and privacy','mydata':'Export your stored player data','delete_me':'Delete your player data','closeleague':'Close league (admin)','plans':'Current access and plans','upgrade':'Upgrade group league','paysupport':'Stars payment support','subscription':'Your Stars subscriptions','cancel':'Cancel renewal in private chat','terms':'Plan terms','support':'Contact support','myid':'Show your Telegram ID privately','addadmin':'Add bot administrator (owner)','removeadmin':'Remove bot administrator (owner)','admins':'List bot administrators (owner)','adminstatus':'Bot administrator status'}
 HELP = 'LeagueHost 🏆\nTurn your group into a friendly weekly quiz league.\n\nAdd me to your group as an admin, then use /newleague. Group admins run /round; members tap one answer within 60 seconds. Correct answers earn 10 points. One answer per person. Scores reset on the weekly leaderboard each Monday (UTC).\n\n/standings — leaderboard\n/privacy — data information\n/mydata — export (private chat)\n/delete_me — delete (private chat)\n\nTry /demo for a private sample question or /invite for a group invitation link.\n\nFree: 5 rounds/week. See /plans for optional host plans. No cash prizes.'
 PRIVACY = 'LeagueHost stores Telegram user IDs, display names, group IDs, quiz answers, timestamps and scores to run leagues. It does not read unrelated chat history. Group standings show player names and scores. Quiz records older than 90 days are removed. Payment receipts and buyer/group IDs are retained for subscription fulfillment, reconciliation and refunds; deleting quiz data does not cancel subscriptions or erase payment records. /mydata exports your records in private chat. /delete_me requests confirmation to erase them. Deleting records removes your scores and can permit replay of an active question. Telegram retains messages under its own policy. Contact the group admin for league concerns.'
 
@@ -56,7 +56,8 @@ class Store:
 CREATE TABLE IF NOT EXISTS rounds(id TEXT PRIMARY KEY, chat INTEGER, question INTEGER, expires INTEGER, week TEXT);
 CREATE TABLE IF NOT EXISTS answers(round TEXT, user INTEGER, name TEXT, choice INTEGER, points INTEGER, created INTEGER, PRIMARY KEY(round,user));
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
-CREATE TABLE IF NOT EXISTS actions(update_id INTEGER PRIMARY KEY, result TEXT);''')
+CREATE TABLE IF NOT EXISTS actions(update_id INTEGER PRIMARY KEY, result TEXT);
+CREATE TABLE IF NOT EXISTS bot_admins(user INTEGER PRIMARY KEY, added_by INTEGER NOT NULL, created INTEGER NOT NULL);''')
   billing.create_tables(self.db)
  def week(self): return time.strftime('%G-W%V',time.gmtime())
  def open_round(self,chat,update_id):
@@ -108,6 +109,8 @@ class API:
 
 class Bot:
  def __init__(self,db,api,username):self.store=db;self.api=api;self.username=username
+ def is_owner(self,uid):return str(uid)==os.getenv('OWNER_TELEGRAM_ID','').strip()
+ def is_admin(self,uid):return self.is_owner(uid) or bool(self.store.db.execute('SELECT 1 FROM bot_admins WHERE user=?',(uid,)).fetchone())
  def send(self,chat,text,**kw):return self.api.call('sendMessage',chat_id=chat,text=text,**kw)
  def handle(self,u):
   cb=u.get('callback_query')
@@ -145,6 +148,27 @@ class Bot:
   if not text.startswith('/') or sender.get('is_bot') or m.get('sender_chat'):return
   chat=m['chat']['id'];private=m['chat']['type']=='private';uid=sender['id'];first=text.split()[0];cmd=first.split('@')[0][1:]
   if '@' in first and first.split('@')[1].lower()!=self.username.lower():return
+  if cmd=='myid':
+   if not private:self.send(chat,'Send /myid in my private chat.');return
+   self.send(chat,'Your Telegram user ID: '+str(uid));return
+  if cmd in ('addadmin','removeadmin','admins'):
+   if not private or not self.is_owner(uid):self.send(chat,'Only the configured bot owner can manage bot administrators in private chat.');return
+   if cmd=='admins':
+    ids=[str(r[0]) for r in self.store.db.execute('SELECT user FROM bot_admins ORDER BY user')]
+    self.send(chat,'Owner: '+str(uid)+'\nBot administrators: '+(', '.join(ids) or 'None'));return
+   args=text.split()[1:]
+   if len(args)!=1 or not args[0].isascii() or not args[0].isdigit() or not 0<int(args[0])<2**52:
+    self.send(chat,'Use /'+cmd+' NUMERIC_TELEGRAM_USER_ID. Ask that person to send /myid here first.');return
+   target=int(args[0])
+   if self.is_owner(target):self.send(chat,'The owner is already an administrator and cannot be removed here.');return
+   with self.store.db:
+    if cmd=='addadmin':self.store.db.execute('INSERT OR IGNORE INTO bot_admins VALUES(?,?,?)',(target,uid,int(time.time())))
+    else:self.store.db.execute('DELETE FROM bot_admins WHERE user=?',(target,))
+   self.send(chat,('Added' if cmd=='addadmin' else 'Removed')+' bot administrator '+str(target)+'. Bot admins can view /adminstatus and run /reconcile; refunds and admin changes remain owner-only. Telegram group roles are unchanged.');return
+  if cmd=='adminstatus':
+   if not private or not self.is_admin(uid):self.send(chat,'Bot administrators only, in private chat.');return
+   active=self.store.db.execute('SELECT COUNT(*) FROM leagues WHERE active=1').fetchone()[0]
+   self.send(chat,'Active leagues: '+str(active)+'\nPaid checkout: '+('enabled' if billing.checkout_enabled() else 'disabled'));return
   if cmd in ('start','help'):self.send(chat,HELP);return
   if cmd=='terms':self.send(chat,TERMS);return
   if cmd=='privacy':self.send(chat,PRIVACY);return
@@ -180,7 +204,7 @@ class Bot:
    for r in matches:self.api.call('editUserStarSubscription',user_id=uid,telegram_payment_charge_id=r[3],is_canceled=True)
    self.send(chat,'Renewal canceled. Paid access remains until the end of the paid period.');return
   if cmd in ('refund','reconcile'):
-   if not private or str(uid)!=os.getenv('OWNER_TELEGRAM_ID',''):self.send(chat,'Owner-only command in private chat.');return
+   if not private or not (self.is_owner(uid) if cmd=='refund' else self.is_admin(uid)):self.send(chat,'Insufficient bot administrator permissions. Use private chat.');return
    args=text.split()[1:]
    if cmd=='reconcile':
     if len(args)>1 or (args and not args[0].isdigit()):self.send(chat,'Use /reconcile OFFSET (default 0).');return
