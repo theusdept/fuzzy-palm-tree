@@ -30,3 +30,8 @@ At-least-once updates may duplicate a notification after a crash; scoring/paymen
 Watch /ready, logs and volume capacity. A persistent HTTP 409 indicates duplicate polling; HTTP 401 indicates token problems. Existing webhooks are not silently removed. Restore backups into a separate environment before production recovery.
 
 Official API references reviewed 2026-10-15: https://core.telegram.org/bots/api and https://core.telegram.org/bots/payments-stars.
+
+## Bot administrators
+Set OWNER_TELEGRAM_ID to the verified owner's numeric Telegram ID in Railway Variables. /myid privately displays the caller's ID. There is no first-user takeover or self-promotion.
+
+In private chat, the owner uses /addadmin USER_ID, /removeadmin USER_ID and /admins. Roles persist in SQLite. Delegated bot admins may run /adminstatus and /reconcile. Only the owner may refund or manage administrators. These commands do not promote Telegram group members; group management still checks actual Telegram group administrator roles.
