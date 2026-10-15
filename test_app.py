@@ -48,3 +48,35 @@ class Tests(unittest.TestCase):
  def test_closed_league(self):
   self.s.db.execute('UPDATE leagues SET active=0');self.assertIn('error',self.s.open_round(-1,1))
 if __name__=='__main__':unittest.main()
+
+
+class AdminTests(unittest.TestCase):
+ def setUp(self):
+  from unittest.mock import patch
+  self.env=patch.dict('os.environ',{'OWNER_TELEGRAM_ID':'42'});self.env.start()
+  self.s=Store(':memory:');self.api=API();self.bot=Bot(self.s,self.api,'LeagueHostBot')
+ def tearDown(self):self.s.db.close();self.env.stop()
+ def command(self,user,text,private=True):
+  self.bot.handle({'message':{'text':text,'from':{'id':user},'chat':{'id':user if private else -1,'type':'private' if private else 'group'}}})
+ def test_owner_add_remove(self):
+  self.command(42,'/addadmin 99');self.assertTrue(self.bot.is_admin(99))
+  self.command(42,'/addadmin 99');self.assertEqual(self.s.db.execute('SELECT COUNT(*) FROM bot_admins').fetchone()[0],1)
+  self.command(42,'/removeadmin 99');self.assertFalse(self.bot.is_admin(99))
+ def test_no_self_promotion_or_delegated_promotion(self):
+  self.command(99,'/addadmin 99');self.assertFalse(self.bot.is_admin(99))
+  self.command(42,'/addadmin 99');self.command(99,'/addadmin 100');self.assertFalse(self.bot.is_admin(100))
+ def test_owner_only_in_private(self):
+  self.command(42,'/addadmin 99',False);self.assertFalse(self.bot.is_admin(99))
+ def test_invalid_ids(self):
+  for value in ('@someone','-1','0','999999999999999999999999','42 extra'):
+   self.command(42,'/addadmin '+value)
+  self.assertEqual(self.s.db.execute('SELECT COUNT(*) FROM bot_admins').fetchone()[0],0)
+ def test_admin_cannot_refund(self):
+  self.command(42,'/addadmin 99');self.command(99,'/refund charge confirm')
+  self.assertFalse(any(c[0]=='refundStarPayment' for c in self.api.calls))
+ def test_owner_cannot_remove_self(self):
+  self.command(42,'/removeadmin 42');self.assertTrue(self.bot.is_owner(42))
+ def test_unconfigured_owner_cannot_be_claimed(self):
+  from unittest.mock import patch
+  with patch.dict('os.environ',{'OWNER_TELEGRAM_ID':''}):
+   self.command(42,'/addadmin 42');self.assertFalse(self.bot.is_admin(42))
