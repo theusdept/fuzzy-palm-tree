@@ -57,8 +57,8 @@ def current_plan(db, chat, now=None):
     return (row[0], row[1]) if row else ('free', None)
 
 
-def create_order(db, chat, buyer, plan):
-    if plan not in PLANS or int(chat) >= 0 or int(buyer) <= 0:
+def create_order(db, chat, buyer, plan, accepted_terms=False):
+    if not accepted_terms or plan not in PLANS or int(chat) >= 0 or int(buyer) <= 0:
         raise ValueError('Invalid plan or group')
     order_id = secrets.token_urlsafe(18)
     with db:
@@ -130,9 +130,13 @@ def record_refund(db, charge_id):
 
 
 def subscription_for_buyer(db, buyer):
-    return db.execute('''SELECT r.chat,r.plan,r.expires,r.charge_id FROM billing_receipts r
-        WHERE r.buyer=? AND r.first_recurring=1 AND r.refunded=0 AND r.expires>?
-        ORDER BY r.paid_at DESC''', (buyer, int(time.time()))).fetchall()
+    return db.execute("""
+        SELECT r.chat,r.plan,MAX(r.expires),
+        COALESCE((SELECT first.charge_id FROM billing_receipts first
+          WHERE first.order_id=r.order_id AND first.first_recurring=1 LIMIT 1),r.charge_id)
+        FROM billing_receipts r WHERE r.buyer=? AND r.refunded=0
+        GROUP BY r.order_id HAVING MAX(r.expires)>? ORDER BY MAX(r.paid_at) DESC
+    """, (buyer, int(time.time()))).fetchall()
 
 
 def receipt_for_refund(db, charge_id):
@@ -143,3 +147,21 @@ def receipt_for_refund(db, charge_id):
 def gross_stars(db):
     row = db.execute('SELECT COUNT(*),COALESCE(SUM(stars),0),COALESCE(SUM(CASE WHEN refunded=0 THEN stars ELSE 0 END),0) FROM billing_receipts').fetchone()
     return row
+
+
+
+def reconcile(db, api, offset=0):
+    """Audit one transaction page; never invent expiry or grant missing entitlements."""
+    transactions = api.call('getStarTransactions', offset=offset, limit=100)['transactions']
+    missing = 0
+    refunds = 0
+    for tx in transactions:
+        source = tx.get('source', {})
+        receiver = tx.get('receiver', {})
+        receipt = receipt_for_refund(db, tx['id'])
+        if source.get('type') == 'user' and source.get('transaction_type') == 'invoice_payment':
+            if not receipt:
+                missing += 1
+        elif receiver.get('type') == 'user' and receipt and receiver.get('user', {}).get('id') == receipt[0]:
+            refunds += int(record_refund(db, tx['id']))
+    return len(transactions), missing, refunds
