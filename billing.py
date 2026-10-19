@@ -11,10 +11,11 @@ PLANS = {
 
 
 def checkout_enabled():
+    owner = os.getenv('OWNER_TELEGRAM_ID', '').strip()
     return (
         os.getenv('PAYMENTS_ENABLED', '').lower() == 'true'
         and os.getenv('PAYSUPPORT_CONTACT', '').strip() != ''
-        and os.getenv('OWNER_TELEGRAM_ID', '').strip().isdigit()
+        and owner.isascii() and owner.isdigit() and 0 < int(owner) < 2**52
     )
 
 

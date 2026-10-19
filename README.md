@@ -35,3 +35,6 @@ Official API references reviewed 2026-10-15: https://core.telegram.org/bots/api 
 Set OWNER_TELEGRAM_ID to the verified owner's numeric Telegram ID in Railway Variables. /myid privately displays the caller's ID. There is no first-user takeover or self-promotion.
 
 In private chat, the owner uses /addadmin USER_ID, /removeadmin USER_ID and /admins. Roles persist in SQLite. Delegated bot admins may run /adminstatus and /reconcile. Only the owner may refund or manage administrators. These commands do not promote Telegram group members; group management still checks actual Telegram group administrator roles.
+
+## Isolated Telegram test-server validation
+See [PAYMENT_READINESS.md](PAYMENT_READINESS.md) for the deployment evidence and no-purchase validation procedure. A separate staging service can set `TELEGRAM_TEST_ENVIRONMENT=true`, `TEST_BOT_TOKEN` and `TEST_DB_PATH` to use Telegram's dedicated test API. Production continues to use `BOT_TOKEN` and `DB_PATH` by default. Never reuse the production token or volume for testing.
