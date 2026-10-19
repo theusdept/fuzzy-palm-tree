@@ -97,9 +97,11 @@ CREATE TABLE IF NOT EXISTS bot_admins(user INTEGER PRIMARY KEY, added_by INTEGER
    self.db.execute('DELETE FROM actions WHERE update_id < COALESCE((SELECT MAX(update_id)-10000 FROM actions),0)')
 
 class API:
- def __init__(self,token):self.token=token
+ def __init__(self,token,test_environment=False):
+  self.token=token
+  self.base_url='https://api.telegram.org/bot'+token+('/test/' if test_environment else '/')
  def call(self,method,**data):
-  req=urllib.request.Request('https://api.telegram.org/bot'+self.token+'/'+method,data=json.dumps(data).encode(),headers={'Content-Type':'application/json'})
+  req=urllib.request.Request(self.base_url+method,data=json.dumps(data).encode(),headers={'Content-Type':'application/json'})
   try:
    with urllib.request.urlopen(req,timeout=40) as response:result=json.load(response)
   except urllib.error.HTTPError as error:
@@ -258,16 +260,30 @@ class Health(BaseHTTPRequestHandler):
   self.wfile.write(json.dumps({'service':'LeagueHost','configured':STATUS['configured'],'telegram_ready':ready}).encode())
  def log_message(self,*args):pass
 
+def runtime_configuration():
+ mode=os.getenv('TELEGRAM_TEST_ENVIRONMENT','false').strip().lower()
+ if mode not in ('true','false'):raise ValueError('TELEGRAM_TEST_ENVIRONMENT must be true or false')
+ if mode=='false':return os.getenv('BOT_TOKEN',''),os.getenv('DB_PATH','/data/leaguehost.db'),False
+ if os.getenv('RAILWAY_ENVIRONMENT_NAME','').lower()=='production':
+  raise ValueError('Telegram test mode requires a separate staging environment')
+ token=os.getenv('TEST_BOT_TOKEN','').strip();path=os.getenv('TEST_DB_PATH','').strip()
+ if not token or token==os.getenv('BOT_TOKEN'):
+  raise ValueError('Set a separate TEST_BOT_TOKEN from the Telegram test server')
+ if not path or os.path.realpath(path)==os.path.realpath(os.getenv('DB_PATH','/data/leaguehost.db')):
+  raise ValueError('Set a separate TEST_DB_PATH on an isolated staging volume')
+ return token,path,True
+
 def main():
+ token,path,test_environment=runtime_configuration()
  threading.Thread(target=HTTPServer(('0.0.0.0',int(os.getenv('PORT','8080'))),Health).serve_forever,daemon=True).start()
  stop=threading.Event()
  for s in (signal.SIGTERM,signal.SIGINT):signal.signal(s,lambda *_:stop.set())
- token=os.getenv('BOT_TOKEN','');STATUS['configured']=bool(token)
+ STATUS['configured']=bool(token)
  if not token:
   print('Setup required: add BOT_TOKEN in Railway Variables.',flush=True)
   stop.wait();return
- path=os.getenv('DB_PATH','/data/leaguehost.db');os.makedirs(os.path.dirname(os.path.abspath(path)),exist_ok=True)
- store=Store(path);api=API(token)
+ os.makedirs(os.path.dirname(os.path.abspath(path)),exist_ok=True)
+ store=Store(path);api=API(token,test_environment=test_environment)
  while not stop.is_set():
   try:
    me=api.call('getMe');wh=api.call('getWebhookInfo')
