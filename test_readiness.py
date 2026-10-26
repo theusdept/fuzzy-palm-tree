@@ -34,13 +34,21 @@ class ReadinessTests(unittest.TestCase):
             self.assertEqual(runtime_configuration(), ('dummy', '/data/leaguehost.db', False))
 
     def test_activation_requires_valid_owner_and_support(self):
-        with patch.dict(os.environ, {'PAYMENTS_ENABLED': 'true', 'PAYSUPPORT_CONTACT': '@operator'}, clear=True):
+        import json
+        checks = {name: {'passed': True, 'evidence': 'independent-verification-reference'}
+                  for name in billing.READINESS_CHECKS}
+        record = json.dumps({'release_sha': 'verifiedsha123', 'approved_by': 'verified-operator', 'checks': checks})
+        env = {'PAYMENTS_ENABLED': 'true', 'PAYSUPPORT_CONTACT': '@operator',
+               'PAYMENT_RELEASE_SHA': 'verifiedsha123', 'PAYMENT_READINESS_EVIDENCE': record}
+        with patch.dict(os.environ, env, clear=True):
             for owner in ('', '0', '-1', '²', str(2**52), '@operator'):
                 with self.subTest(owner=owner), patch.dict(os.environ, {'OWNER_TELEGRAM_ID': owner}):
                     self.assertFalse(billing.checkout_enabled())
             with patch.dict(os.environ, {'OWNER_TELEGRAM_ID': '42'}):
                 self.assertTrue(billing.checkout_enabled())
                 with patch.dict(os.environ, {'PAYSUPPORT_CONTACT': '  '}):
+                    self.assertFalse(billing.checkout_enabled())
+                with patch.dict(os.environ, {'PAYMENT_READINESS_EVIDENCE': ''}):
                     self.assertFalse(billing.checkout_enabled())
 
     def test_plan_limits_expiry_and_group_isolation(self):

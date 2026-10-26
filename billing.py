@@ -1,4 +1,5 @@
 """Telegram Stars subscription ledger and group entitlements for LeagueHost."""
+import json
 import os
 import secrets
 import time
@@ -10,12 +11,50 @@ PLANS = {
 }
 
 
+# Payment readiness is evidence-based and defaults to disabled.
+# Do not mark checks complete without actual test-server and operational records.
+READINESS_CHECKS = (
+    'owner_verified', 'production_healthy', 'terms_approved',
+    'privacy_published', 'support_verified', 'prices_approved',
+    'test_invoice_and_fulfillment', 'test_duplicate_and_refund',
+    'test_reconciliation', 'storage_and_restore', 'monitoring',
+    'platform_requirements',
+)
+
+
+def payment_readiness_verified():
+    """Validate operator-supplied evidence; this does not itself run Telegram tests."""
+    try:
+        record = json.loads(os.getenv('PAYMENT_READINESS_EVIDENCE', ''))
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(record, dict):
+        return False
+    release = os.getenv('RAILWAY_GIT_COMMIT_SHA', '').strip() or os.getenv('PAYMENT_RELEASE_SHA', '').strip()
+    if len(release) < 7 or record.get('release_sha') != release:
+        return False
+    if not isinstance(record.get('approved_by'), str) or not record['approved_by'].strip():
+        return False
+    checks = record.get('checks')
+    if not isinstance(checks, dict):
+        return False
+    for name in READINESS_CHECKS:
+        item = checks.get(name)
+        if not isinstance(item, dict) or item.get('passed') is not True:
+            return False
+        evidence = item.get('evidence')
+        if not isinstance(evidence, str) or len(evidence.strip()) < 8:
+            return False
+    return True
+
+
 def checkout_enabled():
     owner = os.getenv('OWNER_TELEGRAM_ID', '').strip()
     return (
         os.getenv('PAYMENTS_ENABLED', '').lower() == 'true'
-        and os.getenv('PAYSUPPORT_CONTACT', '').strip() != ''
+        and bool(os.getenv('PAYSUPPORT_CONTACT', '').strip())
         and owner.isascii() and owner.isdigit() and 0 < int(owner) < 2**52
+        and payment_readiness_verified()
     )
 
 

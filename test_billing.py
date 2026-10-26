@@ -79,3 +79,24 @@ class LifecycleTests(BillingTests):
   with patch.dict('os.environ',{'OWNER_TELEGRAM_ID':'42'}):
    Bot(store,api,'LeagueHostBot').handle({'message':{'text':'/refund one confirm','from':{'id':99},'chat':{'id':99,'type':'private'}}})
   self.assertFalse(any(c[0]=='refundStarPayment' for c in api.calls));store.db.close()
+
+
+class ReadinessGateTests(unittest.TestCase):
+ def test_missing_evidence_blocks_checkout(self):
+  with patch.dict('os.environ',{'PAYMENTS_ENABLED':'true','OWNER_TELEGRAM_ID':'42','PAYSUPPORT_CONTACT':'@support','PAYMENT_READINESS_EVIDENCE':'','PAYMENT_RELEASE_SHA':'abcdef123'},clear=True):
+   self.assertFalse(billing.checkout_enabled())
+ def test_invalid_json_blocks_checkout(self):
+  with patch.dict('os.environ',{'PAYMENTS_ENABLED':'true','OWNER_TELEGRAM_ID':'42','PAYSUPPORT_CONTACT':'@support','PAYMENT_READINESS_EVIDENCE':'{','PAYMENT_RELEASE_SHA':'abcdef123'},clear=True):
+   self.assertFalse(billing.checkout_enabled())
+ def test_release_mismatch_blocks_checkout(self):
+  import json
+  checks={name:{'passed':True,'evidence':'verified test reference'} for name in billing.READINESS_CHECKS}
+  evidence=json.dumps({'release_sha':'different','approved_by':'operator','checks':checks})
+  with patch.dict('os.environ',{'PAYMENTS_ENABLED':'true','OWNER_TELEGRAM_ID':'42','PAYSUPPORT_CONTACT':'@support','PAYMENT_READINESS_EVIDENCE':evidence,'PAYMENT_RELEASE_SHA':'abcdef123'},clear=True):
+   self.assertFalse(billing.checkout_enabled())
+ def test_complete_evidence_allows_checkout(self):
+  import json
+  checks={name:{'passed':True,'evidence':'verified test reference'} for name in billing.READINESS_CHECKS}
+  evidence=json.dumps({'release_sha':'abcdef123','approved_by':'operator','checks':checks})
+  with patch.dict('os.environ',{'PAYMENTS_ENABLED':'true','OWNER_TELEGRAM_ID':'42','PAYSUPPORT_CONTACT':'@support','PAYMENT_READINESS_EVIDENCE':evidence,'PAYMENT_RELEASE_SHA':'abcdef123'},clear=True):
+   self.assertTrue(billing.checkout_enabled())
