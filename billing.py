@@ -26,7 +26,7 @@ def payment_readiness_verified():
     """Validate operator-supplied evidence; this does not itself run Telegram tests."""
     try:
         record = json.loads(os.getenv('PAYMENT_READINESS_EVIDENCE', ''))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         return False
     if not isinstance(record, dict):
         return False
@@ -53,7 +53,9 @@ def checkout_enabled():
     return (
         os.getenv('PAYMENTS_ENABLED', '').lower() == 'true'
         and bool(os.getenv('PAYSUPPORT_CONTACT', '').strip())
-        and owner.isascii() and owner.isdigit() and 0 < int(owner) < 2**52
+        # Keep the ID identical to Bot.is_owner's canonical decimal comparison.
+        and 1 <= len(owner) <= 16 and owner.isascii() and owner.isdigit()
+        and owner[0] != '0' and int(owner) < 2**52
         and payment_readiness_verified()
     )
 
