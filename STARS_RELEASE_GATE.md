@@ -1,10 +1,12 @@
 # Telegram Stars release gate
 
-The LeagueHost `billing.checkout_enabled()` guard now requires all of the following: `PAYMENTS_ENABLED=true`, numeric `OWNER_TELEGRAM_ID`, monitored `PAYSUPPORT_CONTACT`, and a release-bound JSON `PAYMENT_READINESS_EVIDENCE` with independently recorded evidence for all required checks. Without this record checkout remains off.
+The LeagueHost `billing.checkout_enabled()` guard now requires all of the following: `PAYMENTS_ENABLED=true`, canonical positive decimal `OWNER_TELEGRAM_ID` below `2**52` (no leading zeros), monitored `PAYSUPPORT_CONTACT`, and a release-bound JSON `PAYMENT_READINESS_EVIDENCE` with independently recorded evidence for all required checks. Without this record checkout remains off.
 
 ## Evidence schema
 
 `PAYMENT_READINESS_EVIDENCE` is a JSON object containing `release_sha` (matching `RAILWAY_GIT_COMMIT_SHA`, or `PAYMENT_RELEASE_SHA` if Railway does not expose it), `approved_by` (verified operator), and `checks` (objects with `passed:true` and a nonempty `evidence` reference). Required check keys are in `billing.READINESS_CHECKS`. A recorded reference is an operator assertion, not cryptographic proof: reviewers must check the underlying evidence. Never fabricate evidence, use production funds to test, or paste secrets into GitHub.
+
+The guard checks structure and release equality. It does not authenticate the approving operator, contact support, inspect backups, or verify the referenced records. Unit-test fixtures must never be copied into deployment variables. See [the October 26 validation record](PAYMENT_GATE_VALIDATION_2026-10-26.md) for current evidence and outstanding operational checks.
 
 ## Rollout
 

@@ -209,8 +209,10 @@ class Bot:
    if not private or not (self.is_owner(uid) if cmd=='refund' else self.is_admin(uid)):self.send(chat,'Insufficient bot administrator permissions. Use private chat.');return
    args=text.split()[1:]
    if cmd=='reconcile':
-    if len(args)>1 or (args and not args[0].isdigit()):self.send(chat,'Use /reconcile OFFSET (default 0).');return
+    if len(args)>1 or (args and (len(args[0])>10 or not args[0].isascii() or not args[0].isdigit())):
+     self.send(chat,'Use /reconcile OFFSET (0 to 2147483647; default 0).');return
     offset=int(args[0]) if args else 0
+    if offset>2**31-1:self.send(chat,'Use /reconcile OFFSET (0 to 2147483647; default 0).');return
     count,missing,refunds=billing.reconcile(self.store.db,self.api,offset)
     self.send(chat,f'Audited {count} transactions from offset {offset}. Missing receipts: {missing}; refunds applied: {refunds}. '+(f'Continue: /reconcile {offset+count}' if count==100 else 'End of current transaction list.'));return
    if len(args)!=2 or args[1]!='confirm':self.send(chat,'Use /refund CHARGE_ID confirm after reviewing the customer request.');return
