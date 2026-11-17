@@ -308,7 +308,9 @@ def main():
      if str(e) not in ('Telegram HTTP 400','Telegram HTTP 403'):raise
      print('Skipped undeliverable update '+str(u['update_id']),flush=True)
     with store.db:store.db.execute("INSERT OR REPLACE INTO meta VALUES('offset',?)",(str(u['update_id']+1),))
-  except Exception as e:print('Poll retry: '+type(e).__name__,flush=True);stop.wait(5)
+  except Exception as e:
+   reason=getattr(e,'reason',None);code=getattr(reason,'errno',None);kind=type(reason).__name__ if reason is not None else type(e).__name__
+   print(f'Poll retry: {type(e).__name__}; cause={kind}; errno={code}',flush=True);stop.wait(5)
  store.db.close()
 if __name__=='__main__':main()
 
